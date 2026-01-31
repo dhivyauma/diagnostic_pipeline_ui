@@ -1,6 +1,7 @@
 # diagnostic_pipeline_ui.py
 import streamlit as st
 from enum import Enum
+from datetime import datetime
 
 # Page configuration
 st.set_page_config(
@@ -46,9 +47,29 @@ class Purpose(str, Enum):
     AIRB = "AIRB (Advanced Internal Ratings-Based)"
     ADJUDICATION = "Adjudication"
 
+# Initialize chat history
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# Function to generate responses
+def generate_response(prompt, model_type, portfolio, purpose):
+    """
+    Placeholder for generating responses based on user input.
+    This is a template that can be enhanced later with actual logic.
+    
+    Args:
+        prompt (str): User's input message
+        model_type (str): Selected model type (PD/LGD/EAD)
+        portfolio (str): Selected portfolio type
+        purpose (str): Selected purpose (IFRS 9/AIRB/Adjudication)
+        
+    Returns:
+        str: Generated response
+    """
+    
 # Sidebar for navigation
 with st.sidebar:
-    st.title("Diagnostic Pipeline")
+    st.title("Core Parameter Selection")
     st.markdown("---")
     
     # Model Type Selection
@@ -79,7 +100,7 @@ with st.sidebar:
     run_analysis = st.button("Run Diagnostic", type="primary")
 
 # Main content area
-st.title("Credit Risk Diagnostic Pipeline")
+st.title("Risk Diagnostic Pipeline")
 st.markdown("---")
 
 # Display selected options
@@ -100,7 +121,7 @@ if run_analysis:
         time.sleep(2)  # Simulate processing time
         
         # Display success message
-        st.success("✅ Diagnostic completed successfully!")
+        st.success("Diagnostic completed successfully!")
         
         # Placeholder for results
         st.subheader("Analysis Results")
@@ -117,9 +138,11 @@ if run_analysis:
 else:
     st.info("Configure the diagnostic parameters in the sidebar and click 'Run Diagnostic' to begin.")
 
-# Add some helpful information
+# First, the main content and "About This Tool" section
 st.markdown("""
-    ### About This Tool
+    
+    ### 
+    # About This Tool
     This diagnostic pipeline helps analyze credit risk models by:
     - Validating model performance
     - Identifying potential issues
@@ -130,3 +153,29 @@ st.markdown("""
     2. Click 'Run Diagnostic'
     3. Review the results and download reports
     """)
+
+# Then, the chat interface
+st.markdown("---")
+st.subheader("Diagnostic Assistant")
+
+# Display chat messages
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+# Chat input at the very bottom
+if prompt := st.chat_input("Ask me anything about the diagnostic..."):
+    # Add user message to chat history
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    
+    # Display user message
+    with st.chat_message("user"):
+        st.markdown(prompt)
+    
+    # Generate assistant response
+    with st.chat_message("assistant"):
+        response = generate_response(prompt, model_type, portfolio, purpose)
+        st.markdown(response)
+    
+    # Add assistant response to chat history
+    st.session_state.messages.append({"role": "assistant", "content": response})
