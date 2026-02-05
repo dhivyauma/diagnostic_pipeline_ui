@@ -1,0 +1,16 @@
+{
+  "header": {
+    "model_type": "PD",
+    "portfolio": "Retail",
+    "purpose": "IFRS"
+  },
+  "user_specs": {
+    "default_definition": "hi"
+  },
+  "meta": {
+    "last_updated": "2026-02-04T21:06:32.568891",
+    "completion_status": {
+      "mandatory_complete": false
+    }
+  }
+}

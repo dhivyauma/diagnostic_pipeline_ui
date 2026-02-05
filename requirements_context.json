@@ -1,0 +1,155 @@
+{
+  "AIRB_PD_Requirements": {
+    "default_definition": {
+      "mandatory": true,
+      "description": "The specific criteria for default (e.g., 90 Days Past Due, bankruptcy, or unlikeliness to pay).",
+      "example": "90 DPD + Materiality threshold"
+    },
+    "observation_period": {
+      "mandatory": true,
+      "description": "The historical look-back period used for calibration.",
+      "example": "At least 5 years as per Basel standards"
+    },
+    "low_default_portfolio_flag": {
+      "mandatory": false,
+      "description": "Whether the portfolio has very few defaults, requiring alternative calibration techniques (e.g., Pluto-Tasche).",
+      "example": "Yes/No"
+    }
+  },
+  "AIRB_LGD_Requirements": {
+    "recovery_period": {
+      "mandatory": true,
+      "description": "The maximum time window allowed for recoveries to be considered in the LGD calculation under AIRB framework.",
+      "example": "24 months or 36 months"
+    },
+    "discount_rate": {
+      "mandatory": true,
+      "description": "The rate used to discount future recoveries back to the date of default for AIRB compliance.",
+      "example": "EIR or WACC"
+    },
+    "workout_strategy": {
+      "mandatory": false,
+      "description": "The approach for managing defaulted exposures (e.g., repossession, restructuring).",
+      "example": "Foreclosure and asset sale"
+    }
+  },
+  "AIRB_EAD_Requirements": {
+    "conversion_factor": {
+      "mandatory": true,
+      "description": "The method for calculating credit conversion factors for off-balance sheet exposures.",
+      "example": "Supervisory CCFs or internal estimates"
+    },
+    "exposure_at_default_calculation": {
+      "mandatory": true,
+      "description": "The methodology for calculating EAD at the time of default.",
+      "example": "Current outstanding + CCF applied to undrawn commitments"
+    },
+    "commitment_period": {
+      "mandatory": false,
+      "description": "The time horizon for commitment facilities under AIRB.",
+      "example": "12 months"
+    }
+  },
+  "IFRS9_PD_Requirements": {
+    "default_definition": {
+      "mandatory": true,
+      "description": "The specific criteria for default under IFRS 9 (typically 90 days past due or other evidence).",
+      "example": "90 DPD or reasonable probability of default"
+    },
+    "staging_criteria": {
+      "mandatory": true,
+      "description": "The criteria for classifying exposures into Stage 1, 2, or 3.",
+      "example": "Stage 1: <30 DPD, Stage 2: 30-90 DPD, Stage 3: >90 DPD"
+    },
+    "lifetime_pd_requirement": {
+      "mandatory": true,
+      "description": "Requirements for lifetime PD estimation for Stage 2 and 3 exposures.",
+      "example": "12-month PD for Stage 1, Lifetime PD for Stage 2-3"
+    }
+  },
+  "IFRS9_LGD_Requirements": {
+    "recovery_period": {
+      "mandatory": true,
+      "description": "The maximum time window allowed for recoveries to be considered in the LGD calculation.",
+      "example": "24 months or 36 months"
+    },
+    "discount_rate": {
+      "mandatory": true,
+      "description": "The rate used to discount future recoveries back to the date of default (usually Effective Interest Rate).",
+      "example": "EIR or WACC"
+    },
+    "forward_looking_scenarios": {
+      "mandatory": true,
+      "description": "The macroeconomic scenarios (Base, Upside, Downside) and their respective weightings.",
+      "example": "Base (50%), Upside (20%), Downside (30%)"
+    }
+  },
+  "IFRS9_EAD_Requirements": {
+    "exposure_measurement": {
+      "mandatory": true,
+      "description": "How EAD is measured under IFRS 9 for expected credit loss calculations.",
+      "example": "Gross carrying amount less credit risk adjustments"
+    },
+    "contractual_cash_flows": {
+      "mandatory": true,
+      "description": "The contractual cash flows used in EAD calculations.",
+      "example": "Scheduled principal and interest payments"
+    },
+    "prepayment_assumptions": {
+      "mandatory": false,
+      "description": "Assumptions about prepayment behavior affecting EAD.",
+      "example": "CPR (Constant Prepayment Rate) assumptions"
+    }
+  },
+  "ADJUDICATION_PD_Requirements": {
+    "legal_default_criteria": {
+      "mandatory": true,
+      "description": "Legal criteria for determining default in adjudication context.",
+      "example": "Court judgment or legal filing"
+    },
+    "evidence_requirements": {
+      "mandatory": true,
+      "description": "Evidence needed to support default determination for legal purposes.",
+      "example": "Default notices, payment history, legal documents"
+    },
+    "jurisdictional_rules": {
+      "mandatory": false,
+      "description": "Specific jurisdictional rules affecting default determination.",
+      "example": "State-specific foreclosure laws"
+    }
+  },
+  "ADJUDICATION_LGD_Requirements": {
+    "legal_recovery_process": {
+      "mandatory": true,
+      "description": "Legal process requirements for recovery calculations.",
+      "example": "Foreclosure timeline, bankruptcy proceedings"
+    },
+    "court_costs": {
+      "mandatory": true,
+      "description": "Treatment of legal and court costs in LGD calculations.",
+      "example": "Include attorney fees, filing costs, court expenses"
+    },
+    "settlement_timeline": {
+      "mandatory": false,
+      "description": "Expected timeline for legal settlement and recovery.",
+      "example": "6-24 months depending on jurisdiction"
+    }
+  },
+  "ADJUDICATION_EAD_Requirements": {
+    "legal_exposure_definition": {
+      "mandatory": true,
+      "description": "Legal definition of exposure at default for adjudication purposes.",
+      "example": "Total claim amount including interest and penalties"
+    },
+    "contingent_liabilities": {
+      "mandatory": true,
+      "description": "Treatment of contingent liabilities in EAD calculations.",
+      "example": "Guarantees, letters of credit, legal claims"
+    },
+    "interest_accrual": {
+      "mandatory": false,
+      "description": "How interest accrues post-default for legal calculations.",
+      "example": "Statutory interest rate or contractual rate"
+    }
+  }
+}

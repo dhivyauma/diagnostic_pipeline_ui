@@ -1,0 +1,23 @@
+{
+  "header": {
+    "model_type": "PD",
+    "portfolio": "Retail",
+    "purpose": "IFRS"
+  },
+  "user_specs": {
+    "default_definition": "hi"
+  },
+  "metadata": {
+    "last_updated": "2026-02-04T21:06:32.563850",
+    "completion_status": {
+      "mandatory_total": 3,
+      "mandatory_completed": 1,
+      "optional_total": 0,
+      "optional_completed": 0,
+      "all_mandatory_complete": false,
+      "all_complete": false
+    },
+    "total_fields": 3,
+    "completed_fields": 1
+  }
+}
