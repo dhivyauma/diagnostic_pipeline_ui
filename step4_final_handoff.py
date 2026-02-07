@@ -225,6 +225,6 @@ def create_step4_ui(manager: FinalHandoffManager) -> None:
     st.markdown("### Execution History")
     history = manager.get_execution_history(limit=10)
     if history:
-        st.dataframe(history, use_container_width=True)
+        st.dataframe(history, width='stretch')
     else:
         st.info("No executions saved yet.")

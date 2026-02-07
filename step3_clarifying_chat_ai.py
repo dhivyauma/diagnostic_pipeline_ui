@@ -1,11 +1,14 @@
 # step3_clarifying_chat_ai.py
 import streamlit as st
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Literal
 from datetime import datetime
 import json
 from pathlib import Path
 from pydantic import BaseModel, Field
 import os
+
+from dotenv import load_dotenv
+from pydantic_ai import Agent
 
 
 class DiagnosticContext(BaseModel):
@@ -49,6 +52,51 @@ class ChatSession(BaseModel):
     field_status: Dict[str, FieldStatus] = Field(default_factory=dict)
     chat_history: List[Dict[str, Any]] = Field(default_factory=list)
     current_question: Optional[ClarifyingQuestion] = None
+    question_cache: Dict[str, ClarifyingQuestion] = Field(default_factory=dict)
+    question_cache_llm: Dict[str, bool] = Field(default_factory=dict)
+
+
+class _LLMDeps(BaseModel):
+    model_type: str
+    portfolio: str
+    purpose: str
+    requirements_context: Dict[str, Any]
+    active_requirements: Dict[str, Any]
+    collected_data: Dict[str, Any]
+    chat_history: List[Dict[str, Any]]
+    field_name: str
+    field_config: Dict[str, Any]
+
+
+class _LLMQuestionOutput(BaseModel):
+    question: str
+    context: str
+    example: Optional[str] = None
+    field_type: Literal['text', 'numeric', 'boolean']
+
+
+class _ChatDeps(BaseModel):
+    model_type: str
+    portfolio: str
+    purpose: str
+    requirements_context: Dict[str, Any]
+    active_requirements: Dict[str, Any]
+    collected_data: Dict[str, Any]
+    chat_history: List[Dict[str, Any]]
+    user_message: str
+    expected_field_name: str
+    expected_field_config: Dict[str, Any]
+
+
+class _FieldUpdate(BaseModel):
+    field_name: str
+    value: str
+
+
+class _ChatOutput(BaseModel):
+    assistant_message: str
+    updates: List[_FieldUpdate] = Field(default_factory=list)
+    followup_question: Optional[str] = None
 
 
 def _generate_question_text(field_name: str) -> str:
@@ -64,8 +112,306 @@ class ClarifyingChatAIAgent:
     
     def __init__(self):
         self.session: Optional[ChatSession] = None
-        self.agent = None
+        self.agent: Optional[Agent] = None
+        self.chat_agent: Optional[Agent] = None
         self.last_ai_error: Optional[str] = None
+        self.last_question_ai_error: Optional[str] = None
+        self.last_chat_ai_error: Optional[str] = None
+        self.last_question_rejection: Optional[str] = None
+
+        self.model_name: Optional[str] = None
+        self.requirements_context: Dict[str, Any] = {}
+
+        load_dotenv()
+        self._load_requirements_context()
+        self._init_llm()
+
+    def _load_requirements_context(self) -> None:
+        try:
+            base_dir = Path(__file__).resolve().parent
+            ctx_path = base_dir / 'requirements_context.json'
+            if ctx_path.exists():
+                with open(ctx_path, 'r', encoding='utf-8') as f:
+                    self.requirements_context = json.load(f)
+        except Exception:
+            self.requirements_context = {}
+
+    def _init_llm(self) -> None:
+        raw_key = (
+            os.getenv('OPENROUTER_API_KEY')
+            or os.getenv('OPENAI_API_KEY')
+            or os.getenv('openai_API_KEY')
+        )
+        if isinstance(raw_key, str):
+            raw_key = raw_key.strip()
+
+        if raw_key and raw_key.startswith('sk-or-') and not os.getenv('OPENROUTER_API_KEY'):
+            os.environ['OPENROUTER_API_KEY'] = raw_key
+
+        if not os.getenv('OPENAI_API_KEY') and os.getenv('openai_API_KEY'):
+            os.environ['OPENAI_API_KEY'] = os.getenv('openai_API_KEY', '').strip()
+
+        model_name_env = (os.getenv('CLARIFYING_CHAT_MODEL') or os.getenv('PYDANTIC_AI_MODEL') or '').strip()
+        model_name = model_name_env or ''
+
+        known_providers = {
+            'openai',
+            'openrouter',
+            'anthropic',
+            'gemini',
+            'ollama',
+            'mistral',
+            'deepseek',
+            'azure',
+            'bedrock',
+        }
+
+        if model_name:
+            prefix = model_name.split(':', 1)[0].strip().lower() if ':' in model_name else ''
+            has_known_prefix = bool(prefix) and prefix in known_providers
+
+            if not has_known_prefix:
+                if os.getenv('OPENROUTER_API_KEY'):
+                    model_name = f'openrouter:{model_name}'
+                elif os.getenv('OPENAI_API_KEY'):
+                    model_name = f'openai:{model_name}'
+        else:
+            if os.getenv('OPENROUTER_API_KEY'):
+                model_name = 'openrouter:openai/gpt-oss-20b:free'
+            else:
+                model_name = 'openai:gpt-4o-mini'
+
+        self.model_name = model_name
+
+        try:
+            self.agent = Agent(
+                model_name,
+                deps_type=_LLMDeps,
+                output_type=_LLMQuestionOutput,
+                system_prompt=(
+                    'You are a requirements-clarification assistant for a credit risk diagnostic pipeline. '
+                    'Generate one clear question for the specified field, using the field config (description/example) '
+                    'and the diagnostic header (model_type, portfolio, purpose). '
+                    'Return JSON matching the output schema.'
+                ),
+            )
+        except Exception as e:
+            self.last_ai_error = str(e)
+            self.last_question_ai_error = self.last_ai_error
+            self.agent = None
+
+        try:
+            self.chat_agent = Agent(
+                model_name,
+                deps_type=_ChatDeps,
+                output_type=_ChatOutput,
+                system_prompt=(
+                    'You are a chat assistant collecting missing configuration fields for a credit risk diagnostic pipeline. '
+                    'You will be given diagnostic header (model_type, portfolio, purpose), requirements context, active requirements, '
+                    'collected data so far, chat history, and the user\'s latest message. '
+                    'You will also be told expected_field_name (the next missing field) and its config. '
+                    'Extract field values from the user message and return them as updates. '
+                    'Prioritize expected_field_name. Only return updates for fields that exist in active_requirements. '
+                    'If no usable value for expected_field_name is present, set updates=[] and ask exactly one specific follow-up question '
+                    'for expected_field_name (use its description/example). '
+                    'Never ask the user to provide diagnostic header or requirements context. '
+                    'Return JSON matching the output schema.'
+                ),
+            )
+        except Exception as e:
+            self.last_ai_error = str(e)
+            self.last_chat_ai_error = self.last_ai_error
+            self.chat_agent = None
+
+    def _credits_exhausted(self, err: Optional[str]) -> bool:
+        if not err:
+            return False
+        e = str(err)
+        return ('status_code: 402' in e) or ('Insufficient credits' in e)
+
+    def _provider_key_ready(self) -> bool:
+        model_name = self.model_name or ''
+        provider = model_name.split(':', 1)[0].strip().lower() if ':' in model_name else ''
+        if provider == 'openrouter':
+            return bool(os.getenv('OPENROUTER_API_KEY'))
+        return bool(os.getenv('OPENAI_API_KEY') or os.getenv('openai_API_KEY'))
+
+    def _question_llm_ready(self) -> bool:
+        if self.agent is None:
+            return False
+        if self._credits_exhausted(self.last_question_ai_error):
+            return False
+        return self._provider_key_ready()
+
+    def _chat_llm_ready(self) -> bool:
+        if self.chat_agent is None:
+            return False
+        if self._credits_exhausted(self.last_chat_ai_error):
+            return False
+        return self._provider_key_ready()
+
+    def _llm_ready(self) -> bool:
+        return self._question_llm_ready() or self._chat_llm_ready()
+
+    def get_next_pending_question(self) -> Optional[ClarifyingQuestion]:
+        if not self.session:
+            raise ValueError("Session not initialized")
+
+        next_field = self._get_next_field_to_ask()
+        if next_field == "ALL_COMPLETE":
+            return None
+        return self._generate_question_for_field(next_field)
+
+    def handle_user_message(self, user_message: str) -> Dict[str, Any]:
+        if not self.session:
+            return {'success': False, 'message': 'Session not initialized'}
+
+        cleaned_message = str(user_message or '').strip()
+        if not cleaned_message:
+            return {'success': False, 'message': 'Message cannot be empty'}
+
+        self.session.chat_history.append({
+            'role': 'user',
+            'field_name': None,
+            'content': cleaned_message,
+            'timestamp': datetime.now().isoformat(),
+        })
+
+        expected_field = self._get_next_field_to_ask()
+        expected_field_config = (
+            self.session.context.active_requirements.get(expected_field, {})
+            if expected_field != 'ALL_COMPLETE'
+            else {}
+        )
+
+        assistant_message = ''
+        followup_question: Optional[str] = None
+        updates: List[Dict[str, Any]] = []
+        applied: List[Dict[str, Any]] = []
+        rejected: List[Dict[str, Any]] = []
+
+        can_call_llm = self._chat_llm_ready()
+        if can_call_llm and expected_field != 'ALL_COMPLETE':
+            deps = _ChatDeps(
+                model_type=self.session.context.model_type,
+                portfolio=self.session.context.portfolio,
+                purpose=self.session.context.purpose,
+                requirements_context=self.requirements_context,
+                active_requirements=self.session.context.active_requirements,
+                collected_data=self.session.context.collected_data,
+                chat_history=self.session.chat_history,
+                user_message=cleaned_message,
+                expected_field_name=expected_field,
+                expected_field_config=expected_field_config,
+            )
+
+            allowed_fields = sorted(list(self.session.context.active_requirements.keys()))
+            expected_desc = str(expected_field_config.get('description', '') or '').strip()
+            expected_example = str(expected_field_config.get('example', '') or '').strip()
+
+            prompt = (
+                'Extract configuration field updates from the user message.\n'
+                'Return JSON matching the output schema.\n\n'
+                f"Diagnostic header: model_type={deps.model_type}, portfolio={deps.portfolio}, purpose={deps.purpose}\n\n"
+                f"Allowed fields: {allowed_fields}\n\n"
+                f"Expected field to collect next: {deps.expected_field_name}\n"
+                f"Expected field description: {expected_desc}\n"
+                f"Expected field example: {expected_example}\n\n"
+                f"User message: {deps.user_message}"
+            )
+
+            output = None
+            last_exc: Optional[Exception] = None
+            for attempt in range(2):
+                try:
+                    result = self.chat_agent.run_sync(prompt, deps=deps)
+                    output = result.output
+                    last_exc = None
+                    break
+                except Exception as e:
+                    self.last_ai_error = str(e)
+                    self.last_chat_ai_error = self.last_ai_error
+                    last_exc = e
+                    if 'Received empty model response' in self.last_ai_error and attempt == 0:
+                        continue
+                    break
+
+            if last_exc is None and isinstance(output, _ChatOutput):
+                assistant_message = str(output.assistant_message or '').strip()
+                followup_question = str(output.followup_question).strip() if output.followup_question else None
+                updates = [u.model_dump() for u in (output.updates or [])]
+
+        def _asks_for_internal_context(text: Optional[str]) -> bool:
+            if not text:
+                return False
+            t = str(text).lower()
+            return (
+                'provide the diagnostic header' in t
+                or 'diagnostic header' in t
+                or 'requirements context' in t
+                or 'active requirements' in t
+                or 'expected field name' in t
+                or 'expected field' in t
+            )
+
+        if _asks_for_internal_context(assistant_message):
+            assistant_message = ''
+        if _asks_for_internal_context(followup_question):
+            followup_question = None
+
+        for u in updates:
+            field_name = str(u.get('field_name', '')).strip()
+            value = str(u.get('value', '')).strip()
+            if not field_name or not value:
+                rejected.append({'field_name': field_name, 'value': value, 'reason': 'missing_field_or_value'})
+                continue
+            if field_name not in self.session.context.active_requirements:
+                rejected.append({'field_name': field_name, 'value': value, 'reason': 'unknown_field'})
+                continue
+
+            pr = self.process_user_response(field_name, value, record_chat=False)
+            if pr.get('success'):
+                applied.append({'field_name': field_name, 'value': pr.get('value')})
+            else:
+                rejected.append({'field_name': field_name, 'value': value, 'reason': pr.get('message')})
+
+        if expected_field != 'ALL_COMPLETE' and not applied:
+            pr = self.process_user_response(expected_field, cleaned_message, record_chat=False)
+            if pr.get('success'):
+                applied.append({'field_name': expected_field, 'value': pr.get('value')})
+            else:
+                rejected.append({'field_name': expected_field, 'value': cleaned_message, 'reason': pr.get('message')})
+
+        if applied:
+            pass
+
+        if applied:
+            assistant_message = ''
+            followup_question = None
+
+        assistant_parts: List[str] = []
+        if assistant_message:
+            assistant_parts.append(assistant_message)
+        if followup_question and expected_field != 'ALL_COMPLETE':
+            assistant_parts.append(followup_question)
+
+        assistant_text = '\n\n'.join([p for p in assistant_parts if str(p).strip()])
+        if assistant_text:
+            self.session.chat_history.append({
+                'role': 'assistant',
+                'field_name': expected_field if expected_field != 'ALL_COMPLETE' else None,
+                'content': assistant_text,
+                'timestamp': datetime.now().isoformat(),
+            })
+
+        return {
+            'success': True,
+            'assistant_message': assistant_text,
+            'applied_updates': applied,
+            'rejected_updates': rejected,
+            'completion_status': self.get_completion_status(),
+            'current_json': self.get_current_json(),
+        }
     
     def initialize_session(self, model_type: str, portfolio: str, purpose: str, 
                           active_requirements: Dict[str, Any]) -> None:
@@ -89,7 +435,7 @@ class ClarifyingChatAIAgent:
             )
     
     async def generate_next_question(self) -> Optional[ClarifyingQuestion]:
-        """Generate the next clarifying question using deterministic rules."""
+        """Generate the next clarifying question."""
         if not self.session:
             raise ValueError("Session not initialized")
         
@@ -98,17 +444,129 @@ class ClarifyingChatAIAgent:
         if next_field == "ALL_COMPLETE":
             return None
 
-        field_config = self.session.context.active_requirements.get(next_field, {})
+        question = self._generate_question_for_field(next_field)
+        self.session.current_question = question
+        return question
+
+    def _generate_question_for_field(self, field_name: str) -> ClarifyingQuestion:
+        if not self.session:
+            raise ValueError('Session not initialized')
+
+        cached = self.session.question_cache.get(field_name)
+        if cached is not None:
+            cached_is_llm = bool(self.session.question_cache_llm.get(field_name, False))
+            if cached_is_llm or not self._question_llm_ready():
+                return cached
+
+        field_config = self.session.context.active_requirements.get(field_name, {})
+        default_question_text = _generate_question_text(field_name)
+        question_text = default_question_text
+        context_text = str(field_config.get('description', '') or '')
+        example_text = field_config.get('example')
+        field_type = self._determine_field_type(field_config)
+
+        def _looks_like_prompt_metadata(text: str) -> bool:
+            t = str(text or '').lower()
+            return (
+                'diagnostic header' in t
+                or 'field config' in t
+                or 'active requirements' in t
+                or 'collected data' in t
+                or 'return json' in t
+            )
+
+        def _sanitize_llm_question(text: str) -> str:
+            raw = str(text or '').strip()
+            if not raw:
+                return ''
+
+            lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+            cleaned: List[str] = []
+            for ln in lines:
+                low = ln.lower()
+                if low.startswith('context:') or low.startswith('example:'):
+                    continue
+                if _looks_like_prompt_metadata(low):
+                    continue
+                cleaned.append(ln)
+
+            if not cleaned:
+                return ''
+
+            # Prefer a single interrogative line if present
+            for ln in cleaned:
+                if ln.endswith('?'):
+                    return ln
+
+            # Otherwise take the first line and add a question mark if it reads like a question
+            first = cleaned[0]
+            if first and not first.endswith('?'):
+                first = first + '?'
+            return first
+
+        used_llm = False
+        self.last_question_rejection = None
+        if self._question_llm_ready():
+            deps = _LLMDeps(
+                model_type=self.session.context.model_type,
+                portfolio=self.session.context.portfolio,
+                purpose=self.session.context.purpose,
+                requirements_context=self.requirements_context,
+                active_requirements=self.session.context.active_requirements,
+                collected_data=self.session.context.collected_data,
+                chat_history=self.session.chat_history,
+                field_name=field_name,
+                field_config=field_config,
+            )
+
+            prompt = (
+                'Generate the next clarifying question for the specified field.\n\n'
+                f'Diagnostic header:\n{json.dumps({"model_type": deps.model_type, "portfolio": deps.portfolio, "purpose": deps.purpose}, indent=2)}\n\n'
+                f'Field to generate question for: {deps.field_name}\n'
+                f'Field config:\n{json.dumps(deps.field_config, indent=2)}\n\n'
+                f'Collected data so far:\n{json.dumps(deps.collected_data, indent=2)}\n\n'
+            )
+
+            last_exc: Optional[Exception] = None
+            output = None
+            for attempt in range(2):
+                try:
+                    result = self.agent.run_sync(prompt, deps=deps)
+                    output = result.output
+                    last_exc = None
+                    break
+                except Exception as e:
+                    last_exc = e
+                    self.last_ai_error = str(e)
+                    self.last_question_ai_error = self.last_ai_error
+                    if 'Received empty model response' in self.last_ai_error and attempt == 0:
+                        continue
+                    break
+
+            if last_exc is None and isinstance(output, _LLMQuestionOutput):
+                raw_q = str(output.question or '')
+                sanitized_q = _sanitize_llm_question(raw_q)
+                if sanitized_q and sanitized_q.strip() and not _looks_like_prompt_metadata(sanitized_q):
+                    question_text = sanitized_q.strip()
+                    used_llm = True
+                field_type = str(output.field_type)
+
+                if not used_llm:
+                    preview = raw_q.strip().replace('\n', ' ')[:160]
+                    self.last_question_rejection = f'LLM question rejected (unusable/metadata). Raw preview: {preview}'
+            elif last_exc is not None:
+                self.last_question_rejection = f'LLM question failed: {str(last_exc)[:160]}'
 
         question = ClarifyingQuestion(
-            field_name=next_field,
-            question=_generate_question_text(next_field),
-            context=str(field_config.get('description', '') or ''),
-            example=field_config.get('example'),
-            is_mandatory=field_config.get('mandatory', False),
-            field_type=self._determine_field_type(field_config),
+            field_name=field_name,
+            question=question_text,
+            context=context_text,
+            example=example_text,
+            is_mandatory=bool(field_config.get('mandatory', False)),
+            field_type=field_type,
         )
-        self.session.current_question = question
+        self.session.question_cache[field_name] = question
+        self.session.question_cache_llm[field_name] = used_llm
         return question
 
     def _get_next_field_to_ask(self) -> str:
@@ -144,7 +602,7 @@ class ClarifyingChatAIAgent:
         
         return 'text'
     
-    def process_user_response(self, field_name: str, user_input: str) -> Dict[str, Any]:
+    def process_user_response(self, field_name: str, user_input: str, record_chat: bool = True) -> Dict[str, Any]:
         """Process and validate user response"""
         if not self.session:
             return {'success': False, 'message': 'Session not initialized'}
@@ -169,12 +627,13 @@ class ClarifyingChatAIAgent:
             self.session.field_status[field_name].timestamp = datetime.now()
             
             # Add to chat history
-            self.session.chat_history.append({
-                'role': 'user',
-                'field_name': field_name,
-                'content': cleaned_input,
-                'timestamp': datetime.now().isoformat()
-            })
+            if record_chat:
+                self.session.chat_history.append({
+                    'role': 'user',
+                    'field_name': field_name,
+                    'content': cleaned_input,
+                    'timestamp': datetime.now().isoformat()
+                })
             
             return {
                 'success': True,

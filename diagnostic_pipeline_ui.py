@@ -1,6 +1,7 @@
 # diagnostic_pipeline_ui.py
 import streamlit as st
 import json
+from datetime import datetime
 from enum import Enum
 from requirements_loader import RequirementsLoader
 from step3_clarifying_chat_ai import ClarifyingChatAIAgent
@@ -66,6 +67,10 @@ def init_session_state():
         st.session_state.selected_config = None
     if "show_step4" not in st.session_state:
         st.session_state.show_step4 = False
+    if "chat_last_prompt_field" not in st.session_state:
+        st.session_state.chat_last_prompt_field = None
+    if "draft_saved" not in st.session_state:
+        st.session_state.draft_saved = False
     if "last_lookup_result" not in st.session_state:
         st.session_state.last_lookup_result = None
  
@@ -125,7 +130,7 @@ with st.sidebar:
     )
  
     run_analysis = st.button("Run Diagnostic", type="primary")
- 
+
     if run_analysis:
         st.session_state.diagnostic_started = True
         st.session_state.selected_config = {
@@ -134,6 +139,8 @@ with st.sidebar:
             "purpose": purpose,
         }
         st.session_state.show_step4 = False
+        st.session_state.chat_last_prompt_field = None
+        st.session_state.draft_saved = False
  
 # Main content area
 st.title("Risk Diagnostic Pipeline")
@@ -168,7 +175,7 @@ if run_analysis or st.session_state.get("diagnostic_started", False):
  
             if lookup_result["success"]:
                 st.success("Requirements loaded successfully!")
- 
+
                 # Initialize the chat agent with loaded requirements
                 st.session_state.chat_ai_agent.initialize_session(
                     model_type=clean_model_type,
@@ -176,20 +183,11 @@ if run_analysis or st.session_state.get("diagnostic_started", False):
                     purpose=clean_purpose,
                     active_requirements=lookup_result["active_requirements"]
                 )
- 
-                # Generate first question
-                import asyncio
-                try:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    st.session_state.current_question = loop.run_until_complete(
-                        st.session_state.chat_ai_agent.generate_next_question()
-                    )
-                    loop.close()
-                except Exception as e:
-                    st.error(f"Error generating question: {e}")
-                    st.session_state.current_question = None
- 
+
+                st.session_state.current_question = None
+                st.session_state.chat_last_prompt_field = None
+                st.session_state.draft_saved = False
+
                 st.session_state.last_lookup_result = lookup_result
             else:
                 st.session_state.last_lookup_result = lookup_result
@@ -213,173 +211,158 @@ if run_analysis or st.session_state.get("diagnostic_started", False):
             status_emoji = "✅" if completion_status['all_mandatory_complete'] else "⏳"
             st.metric("Status", f"{status_emoji} {'Complete' if completion_status['all_mandatory_complete'] else 'In Progress'}")
 
-        # Show current question or completion message
-        if st.session_state.current_question:
-            question = st.session_state.current_question
-
-            st.markdown("### Missing Field Questionnaire")
-            st.markdown(f"**{question.question}**")
-
-            if getattr(question, "context", None):
-                if str(question.context).strip():
-                    st.markdown(f"**Context:** {question.context}")
-            if getattr(question, "example", None):
-                if str(question.example).strip():
-                    st.markdown(f"**Example:** {question.example}")
-
-            # Input field based on field type
-            if question.field_type == 'boolean':
-                user_response = st.radio(
-                    "Your response:",
-                    ["Yes", "No"],
-                    key=f"response_{question.field_name}"
-                )
-            else:
-                user_response = st.text_area(
-                    "Your response:",
-                    key=f"response_{question.field_name}",
-                    placeholder="Enter your response here...",
-                    help="Provide a detailed response based on the question above."
+        try:
+            model_name = getattr(st.session_state.chat_ai_agent, 'model_name', None)
+            llm_ready = False
+            question_llm_ready = False
+            chat_llm_ready = False
+            try:
+                llm_ready = bool(getattr(st.session_state.chat_ai_agent, '_llm_ready')())
+            except Exception:
+                llm_ready = False
+            try:
+                question_llm_ready = bool(getattr(st.session_state.chat_ai_agent, '_question_llm_ready')())
+            except Exception:
+                question_llm_ready = False
+            try:
+                chat_llm_ready = bool(getattr(st.session_state.chat_ai_agent, '_chat_llm_ready')())
+            except Exception:
+                chat_llm_ready = False
+            if model_name:
+                st.caption(
+                    f"LLM model: {model_name} ({'ready' if llm_ready else 'not ready'}) | "
+                    f"questions: {'ready' if question_llm_ready else 'fallback'} | "
+                    f"chat: {'ready' if chat_llm_ready else 'fallback'}"
                 )
 
-            # Submit button
-            col1, col2 = st.columns([1, 1])
-            with col1:
-                if st.button("Submit Response", type="primary"):
-                    try:
-                        if user_response and user_response.strip():
-                            result = st.session_state.chat_ai_agent.process_user_response(
-                                question.field_name,
-                                user_response
-                            )
+            try:
+                last_err = str(getattr(st.session_state.chat_ai_agent, 'last_ai_error', '') or '')
+                if last_err and ('status_code: 402' in last_err or 'Insufficient credits' in last_err):
+                    st.warning(
+                        'LLM credits appear to be exhausted (402: Insufficient credits). '
+                        'The app will fall back to deterministic prompts until credits are restored or the model/provider is changed.'
+                    )
+            except Exception:
+                pass
 
-                            if result['success']:
-                                st.success(result['message'])
+            try:
+                q_err = str(getattr(st.session_state.chat_ai_agent, 'last_question_ai_error', '') or '')
+                c_err = str(getattr(st.session_state.chat_ai_agent, 'last_chat_ai_error', '') or '')
+                if q_err and not question_llm_ready:
+                    st.caption(f"Question LLM error: {q_err[:160]}")
+                if c_err and not chat_llm_ready:
+                    st.caption(f"Chat LLM error: {c_err[:160]}")
+            except Exception:
+                pass
+        except Exception:
+            pass
 
-                                # Save response to draft JSON
-                                try:
-                                    current_json = st.session_state.chat_ai_agent.get_current_json()
-                                    saved_file = st.session_state.chat_ai_agent.save_current_json()
+        chat_history = []
+        try:
+            if getattr(st.session_state.chat_ai_agent, "session", None) is not None:
+                chat_history = st.session_state.chat_ai_agent.session.chat_history
+        except Exception:
+            chat_history = []
 
-                                    json_store = Step4JSONStore()
-                                    completion_status = st.session_state.chat_ai_agent.get_completion_status()
-                                    draft = json_store.upsert_field(
-                                        header=current_json.get("header", {}),
-                                        field=question.field_name,
-                                        value=result.get("value"),
-                                        completion_status=completion_status,
-                                    )
-                                except Exception as e:
-                                    st.error(f"Error saving response: {str(e)}")
-                                    st.exception(e)
+        try:
+            next_question = st.session_state.chat_ai_agent.get_next_pending_question()
+        except Exception:
+            next_question = None
 
-                                # Generate next question
-                                import asyncio
-                                try:
-                                    loop = asyncio.new_event_loop()
-                                    asyncio.set_event_loop(loop)
-                                    next_question = loop.run_until_complete(
-                                        st.session_state.chat_ai_agent.generate_next_question()
-                                    )
-                                    loop.close()
+        if next_question is not None:
+            try:
+                source = 'fallback'
+                is_llm = False
+                if getattr(st.session_state.chat_ai_agent, 'session', None) is not None:
+                    cache_llm = getattr(st.session_state.chat_ai_agent.session, 'question_cache_llm', {})
+                    is_llm = bool(cache_llm.get(next_question.field_name, False))
+                source = 'llm' if is_llm else 'fallback'
+                st.caption(f"Question source: {source}")
 
-                                    if next_question is None:
-                                        st.session_state.current_question = None
-                                        st.success("All questions completed!")
-                                    else:
-                                        st.session_state.current_question = next_question
-                                        st.info("Response recorded. Next question loaded.")
-                                except Exception as e:
-                                    st.error(f"Error generating next question: {e}")
-                                    st.session_state.current_question = None
-                            else:
-                                st.error(result['message'])
-                        else:
-                            st.error("Please provide a response before submitting.")
-                    except Exception as e:
-                        st.error(f"Submission error: {str(e)}")
-                        st.exception(e)
-        else:
-            # All questions completed
-            completion_status = st.session_state.chat_ai_agent.get_completion_status()
-            if not completion_status.get("all_complete", False):
-                st.warning("No active question is loaded yet. Click below to retry loading the next question.")
+                if not is_llm:
+                    rej = str(getattr(st.session_state.chat_ai_agent, 'last_question_rejection', '') or '')
+                    if rej.strip():
+                        st.caption(f"Fallback reason: {rej}")
+            except Exception:
+                pass
 
-                if st.button("Retry Loading Question", type="primary"):
-                    import asyncio
-                    try:
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        st.session_state.current_question = loop.run_until_complete(
-                            st.session_state.chat_ai_agent.generate_next_question()
-                        )
-                        loop.close()
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Error generating question: {e}")
-                        st.session_state.current_question = None
+            prompt_parts = [str(next_question.question or '').strip()]
+            if getattr(next_question, "context", None) and str(next_question.context).strip():
+                prompt_parts.append(f"Context: {next_question.context}")
+            if getattr(next_question, "example", None) and str(next_question.example).strip():
+                prompt_parts.append(f"Example: {next_question.example}")
+            assistant_prompt = "\n\n".join([p for p in prompt_parts if p])
 
-            else:
-                st.success("All clarifying questions completed!")
+            last_msg = chat_history[-1] if chat_history else None
+            already_seeded = bool(
+                last_msg
+                and last_msg.get('role') == 'assistant'
+                and str(last_msg.get('field_name') or '') == str(next_question.field_name or '')
+                and str(last_msg.get('content') or '').strip() == assistant_prompt.strip()
+            )
 
+            if not already_seeded:
+                try:
+                    if getattr(st.session_state.chat_ai_agent, "session", None) is not None:
+                        st.session_state.chat_ai_agent.session.chat_history.append({
+                            'role': 'assistant',
+                            'field_name': next_question.field_name,
+                            'content': assistant_prompt,
+                            'timestamp': __import__('datetime').datetime.now().isoformat(),
+                        })
+                        chat_history = st.session_state.chat_ai_agent.session.chat_history
+                except Exception:
+                    pass
+
+            st.session_state.chat_last_prompt_field = next_question.field_name
+
+        for msg in chat_history:
+            role = msg.get("role")
+            content = str(msg.get("content", "") or "")
+            if role in ("user", "assistant") and content.strip():
+                with st.chat_message(role):
+                    st.markdown(content)
+
+        user_text = st.chat_input("Type your response...")
+        if user_text:
+            try:
+                with st.chat_message("user"):
+                    st.markdown(str(user_text))
+
+                with st.chat_message("assistant"):
+                    typing_placeholder = st.empty()
+                    typing_placeholder.markdown("...")
+
+                resp = st.session_state.chat_ai_agent.handle_user_message(user_text)
+                if not resp.get("success"):
+                    typing_placeholder.markdown(resp.get("message", "Failed to process message"))
+                else:
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Submission error: {str(e)}")
+                st.exception(e)
+
+        completion_status = st.session_state.chat_ai_agent.get_completion_status()
+        if completion_status.get("all_complete", False):
+            st.success("All clarifying questions completed!")
+
+        if completion_status.get("all_mandatory_complete", False) and not st.session_state.get("draft_saved", False):
+            try:
                 collected_data = st.session_state.chat_ai_agent.get_collected_data()
-                with st.expander("Collected Data Summary", expanded=False):
-                    st.json(collected_data)
+                ts = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+                filename = f"diagnostic_draft_{ts}.json"
+                json_store = Step4JSONStore(filename=filename)
+                json_store.save(
+                    {
+                        "header": collected_data.get("header", {}),
+                        "user_specs": collected_data.get("user_specs", {}),
+                    },
+                    completion_status=completion_status,
+                )
+                st.session_state.draft_saved = True
+            except Exception as e:
+                st.error(f"Error saving draft: {str(e)}")
 
-            # Proceed to Step 4 button
-            collected_data = st.session_state.chat_ai_agent.get_collected_data()
-            completion_status = collected_data.get("completion_status") or {}
-            if completion_status.get("all_mandatory_complete", False):
-                if st.button("Proceed to Step 4 - Final Handoff", type="primary"):
-                    try:
-                        json_store = Step4JSONStore()
-                        for k, v in (collected_data.get("user_specs") or {}).items():
-                            json_store.upsert_field(
-                                header=collected_data.get("header", {}),
-                                field=k,
-                                value=v,
-                                completion_status=completion_status,
-                            )
-                        draft = json_store.load()
-                        saved_file = st.session_state.handoff_manager.save_final_json(draft)
-                        st.success(f"Final JSON automatically saved: {saved_file}")
-                    except Exception as e:
-                        st.error(f"Error saving final JSON: {str(e)}")
- 
-                    st.session_state.show_step4 = True
-                    st.rerun()
-            else:
-                st.warning("Mandatory fields are not complete yet. Please finish Step 3 before proceeding to Step 4.")
- 
-            # Field summary
-            with st.expander("Field Status Summary"):
-                field_summary = st.session_state.chat_ai_agent.get_field_summary()
- 
-                for field in field_summary:
-                    status_emoji = {
-                        "pending": "⏳",
-                        "provided": "✅",
-                        "clarified": "🔄"
-                    }.get(field['status'], "❓")
- 
-                    col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
-                    with col1:
-                        st.write(f"{status_emoji} **{field['display_name']}**")
-                    with col2:
-                        st.write(f"{'Mandatory' if field['mandatory'] else 'Optional'}")
-                    with col3:
-                        st.write(field['status'])
-                    with col4:
-                        if field['value']:
-                            st.write(f"`{field['value'][:50]}...`" if len(field['value']) > 50 else f"`{field['value']}`")
-                        else:
-                            st.write("—")
- 
-                if st.button("Reset All Fields"):
-                    st.session_state.chat_ai_agent.reset_session()
-                    st.session_state.current_question = None
-                    st.rerun()
- 
     elif lookup_result and not lookup_result.get("success"):
         st.error("Failed to load requirements")
         st.error(lookup_result["error"])
